@@ -4,7 +4,8 @@ export interface AdminConfig {
     Announcement: string;
     SearchDownstreamMaxPage: number;
     SiteInterfaceCacheTime: number;
-    SearchResultDefaultAggregate: boolean;
+    ImageProxy: string;
+    DoubanProxy: string;
   };
   UserConfig: {
     AllowRegister: boolean;

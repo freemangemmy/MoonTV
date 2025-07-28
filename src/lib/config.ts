@@ -44,9 +44,11 @@ let fileConfig: ConfigFileStruct;
 let cachedConfig: AdminConfig;
 
 async function initConfig() {
+  if (cachedConfig) {
+    return;
+  }
+
   if (process.env.DOCKER_ENV === 'true') {
-    // 这里用 eval("require") 避开静态分析，防止 Edge Runtime 打包时报 "Can't resolve 'fs'"
-    // 在实际 Node.js 运行时才会执行到，因此不会影响 Edge 环境。
     // eslint-disable-next-line @typescript-eslint/no-implied-eval
     const _require = eval('require') as NodeRequire;
     const fs = _require('fs') as typeof import('fs');
@@ -64,141 +66,139 @@ async function initConfig() {
   if (storageType !== 'localstorage') {
     // 数据库存储，读取并补全管理员配置
     const storage = getStorage();
-    (async () => {
-      try {
-        // 尝试从数据库获取管理员配置
-        let adminConfig: AdminConfig | null = null;
-        if (storage && typeof (storage as any).getAdminConfig === 'function') {
-          adminConfig = await (storage as any).getAdminConfig();
+
+    try {
+      // 尝试从数据库获取管理员配置
+      let adminConfig: AdminConfig | null = null;
+      if (storage && typeof (storage as any).getAdminConfig === 'function') {
+        adminConfig = await (storage as any).getAdminConfig();
+      }
+
+      // 获取所有用户名，用于补全 Users
+      let userNames: string[] = [];
+      if (storage && typeof (storage as any).getAllUsers === 'function') {
+        try {
+          userNames = await (storage as any).getAllUsers();
+        } catch (e) {
+          console.error('获取用户列表失败:', e);
         }
+      }
 
-        // 获取所有用户名，用于补全 Users
-        let userNames: string[] = [];
-        if (storage && typeof (storage as any).getAllUsers === 'function') {
-          try {
-            userNames = await (storage as any).getAllUsers();
-          } catch (e) {
-            console.error('获取用户列表失败:', e);
-          }
-        }
+      // 从文件中获取源信息，用于补全源
+      const apiSiteEntries = Object.entries(fileConfig.api_site);
 
-        // 从文件中获取源信息，用于补全源
-        const apiSiteEntries = Object.entries(fileConfig.api_site);
-
-        if (adminConfig) {
-          // 补全 SourceConfig
-          const existed = new Set(
-            (adminConfig.SourceConfig || []).map((s) => s.key)
-          );
-          apiSiteEntries.forEach(([key, site]) => {
-            if (!existed.has(key)) {
-              adminConfig!.SourceConfig.push({
-                key,
-                name: site.name,
-                api: site.api,
-                detail: site.detail,
-                from: 'config',
-                disabled: false,
-              });
-            }
-          });
-
-          // 检查现有源是否在 fileConfig.api_site 中，如果不在则标记为 custom
-          const apiSiteKeys = new Set(apiSiteEntries.map(([key]) => key));
-          adminConfig.SourceConfig.forEach((source) => {
-            if (!apiSiteKeys.has(source.key)) {
-              source.from = 'custom';
-            }
-          });
-
-          const existedUsers = new Set(
-            (adminConfig.UserConfig.Users || []).map((u) => u.username)
-          );
-          userNames.forEach((uname) => {
-            if (!existedUsers.has(uname)) {
-              adminConfig!.UserConfig.Users.push({
-                username: uname,
-                role: 'user',
-              });
-            }
-          });
-          // 站长
-          const ownerUser = process.env.USERNAME;
-          if (ownerUser) {
-            adminConfig!.UserConfig.Users =
-              adminConfig!.UserConfig.Users.filter(
-                (u) => u.username !== ownerUser
-              );
-            adminConfig!.UserConfig.Users.unshift({
-              username: ownerUser,
-              role: 'owner',
-            });
-          }
-        } else {
-          // 数据库中没有配置，创建新的管理员配置
-          let allUsers = userNames.map((uname) => ({
-            username: uname,
-            role: 'user',
-          }));
-          const ownerUser = process.env.USERNAME;
-          if (ownerUser) {
-            allUsers = allUsers.filter((u) => u.username !== ownerUser);
-            allUsers.unshift({
-              username: ownerUser,
-              role: 'owner',
-            });
-          }
-          adminConfig = {
-            SiteConfig: {
-              SiteName: process.env.SITE_NAME || 'MoonTV',
-              Announcement:
-                process.env.NEXT_PUBLIC_ANNOUNCEMENT ||
-                '本网站仅提供影视信息搜索服务，所有内容均来自第三方网站。本站不存储任何视频资源，不对任何内容的准确性、合法性、完整性负责。',
-              SearchDownstreamMaxPage:
-                Number(process.env.NEXT_PUBLIC_SEARCH_MAX_PAGE) || 5,
-              SiteInterfaceCacheTime: fileConfig.cache_time || 7200,
-              SearchResultDefaultAggregate:
-                process.env.NEXT_PUBLIC_AGGREGATE_SEARCH_RESULT !== 'false',
-            },
-            UserConfig: {
-              AllowRegister: process.env.NEXT_PUBLIC_ENABLE_REGISTER === 'true',
-              Users: allUsers as any,
-            },
-            SourceConfig: apiSiteEntries.map(([key, site]) => ({
+      if (adminConfig) {
+        // 补全 SourceConfig
+        const existed = new Set(
+          (adminConfig.SourceConfig || []).map((s) => s.key)
+        );
+        apiSiteEntries.forEach(([key, site]) => {
+          if (!existed.has(key)) {
+            adminConfig!.SourceConfig.push({
               key,
               name: site.name,
               api: site.api,
               detail: site.detail,
               from: 'config',
               disabled: false,
-            })),
-          };
-        }
+            });
+          }
+        });
 
-        // 写回数据库（更新/创建）
-        if (storage && typeof (storage as any).setAdminConfig === 'function') {
-          await (storage as any).setAdminConfig(adminConfig);
-        }
+        // 检查现有源是否在 fileConfig.api_site 中，如果不在则标记为 custom
+        const apiSiteKeys = new Set(apiSiteEntries.map(([key]) => key));
+        adminConfig.SourceConfig.forEach((source) => {
+          if (!apiSiteKeys.has(source.key)) {
+            source.from = 'custom';
+          }
+        });
 
-        // 更新缓存
-        cachedConfig = adminConfig;
-      } catch (err) {
-        console.error('加载管理员配置失败:', err);
+        const existedUsers = new Set(
+          (adminConfig.UserConfig.Users || []).map((u) => u.username)
+        );
+        userNames.forEach((uname) => {
+          if (!existedUsers.has(uname)) {
+            adminConfig!.UserConfig.Users.push({
+              username: uname,
+              role: 'user',
+            });
+          }
+        });
+        // 站长
+        const ownerUser = process.env.USERNAME;
+        if (ownerUser) {
+          adminConfig!.UserConfig.Users = adminConfig!.UserConfig.Users.filter(
+            (u) => u.username !== ownerUser
+          );
+          adminConfig!.UserConfig.Users.unshift({
+            username: ownerUser,
+            role: 'owner',
+          });
+        }
+      } else {
+        // 数据库中没有配置，创建新的管理员配置
+        let allUsers = userNames.map((uname) => ({
+          username: uname,
+          role: 'user',
+        }));
+        const ownerUser = process.env.USERNAME;
+        if (ownerUser) {
+          allUsers = allUsers.filter((u) => u.username !== ownerUser);
+          allUsers.unshift({
+            username: ownerUser,
+            role: 'owner',
+          });
+        }
+        adminConfig = {
+          SiteConfig: {
+            SiteName: process.env.SITE_NAME || 'MoonTV',
+            Announcement:
+              process.env.ANNOUNCEMENT ||
+              '本网站仅提供影视信息搜索服务，所有内容均来自第三方网站。本站不存储任何视频资源，不对任何内容的准确性、合法性、完整性负责。',
+            SearchDownstreamMaxPage:
+              Number(process.env.NEXT_PUBLIC_SEARCH_MAX_PAGE) || 5,
+            SiteInterfaceCacheTime: fileConfig.cache_time || 7200,
+            ImageProxy: process.env.NEXT_PUBLIC_IMAGE_PROXY || '',
+            DoubanProxy: process.env.NEXT_PUBLIC_DOUBAN_PROXY || '',
+          },
+          UserConfig: {
+            AllowRegister: process.env.NEXT_PUBLIC_ENABLE_REGISTER === 'true',
+            Users: allUsers as any,
+          },
+          SourceConfig: apiSiteEntries.map(([key, site]) => ({
+            key,
+            name: site.name,
+            api: site.api,
+            detail: site.detail,
+            from: 'config',
+            disabled: false,
+          })),
+        };
       }
-    })();
+
+      // 写回数据库（更新/创建）
+      if (storage && typeof (storage as any).setAdminConfig === 'function') {
+        await (storage as any).setAdminConfig(adminConfig);
+      }
+
+      // 更新缓存
+      cachedConfig = adminConfig;
+    } catch (err) {
+      console.error('加载管理员配置失败:', err);
+    }
   } else {
     // 本地存储直接使用文件配置
     cachedConfig = {
       SiteConfig: {
         SiteName: process.env.SITE_NAME || 'MoonTV',
         Announcement:
-          process.env.NEXT_PUBLIC_ANNOUNCEMENT ||
+          process.env.ANNOUNCEMENT ||
           '本网站仅提供影视信息搜索服务，所有内容均来自第三方网站。本站不存储任何视频资源，不对任何内容的准确性、合法性、完整性负责。',
         SearchDownstreamMaxPage:
           Number(process.env.NEXT_PUBLIC_SEARCH_MAX_PAGE) || 5,
         SiteInterfaceCacheTime: fileConfig.cache_time || 7200,
-        SearchResultDefaultAggregate:
-          process.env.NEXT_PUBLIC_AGGREGATE_SEARCH_RESULT !== 'false',
+        ImageProxy: process.env.NEXT_PUBLIC_IMAGE_PROXY || '',
+        DoubanProxy: process.env.NEXT_PUBLIC_DOUBAN_PROXY || '',
       },
       UserConfig: {
         AllowRegister: process.env.NEXT_PUBLIC_ENABLE_REGISTER === 'true',
@@ -216,9 +216,81 @@ async function initConfig() {
   }
 }
 
-initConfig();
+export async function getConfig(): Promise<AdminConfig> {
+  const storageType = process.env.NEXT_PUBLIC_STORAGE_TYPE || 'localstorage';
+  if (process.env.DOCKER_ENV === 'true' || storageType === 'localstorage') {
+    await initConfig();
+    return cachedConfig;
+  }
+  // 非 docker 环境且 DB 存储，直接读 db 配置
+  const storage = getStorage();
+  let adminConfig: AdminConfig | null = null;
+  if (storage && typeof (storage as any).getAdminConfig === 'function') {
+    adminConfig = await (storage as any).getAdminConfig();
+  }
+  if (adminConfig) {
+    // 合并一些环境变量配置
+    adminConfig.SiteConfig.SiteName = process.env.SITE_NAME || 'MoonTV';
+    adminConfig.SiteConfig.Announcement =
+      process.env.ANNOUNCEMENT ||
+      '本网站仅提供影视信息搜索服务，所有内容均来自第三方网站。本站不存储任何视频资源，不对任何内容的准确性、合法性、完整性负责。';
+    adminConfig.UserConfig.AllowRegister =
+      process.env.NEXT_PUBLIC_ENABLE_REGISTER === 'true';
+    adminConfig.SiteConfig.ImageProxy =
+      process.env.NEXT_PUBLIC_IMAGE_PROXY || '';
+    adminConfig.SiteConfig.DoubanProxy =
+      process.env.NEXT_PUBLIC_DOUBAN_PROXY || '';
 
-export function getConfig(): AdminConfig {
+    // 合并文件中的源信息
+    fileConfig = runtimeConfig as unknown as ConfigFileStruct;
+    const apiSiteEntries = Object.entries(fileConfig.api_site);
+    const existed = new Set((adminConfig.SourceConfig || []).map((s) => s.key));
+    apiSiteEntries.forEach(([key, site]) => {
+      if (!existed.has(key)) {
+        adminConfig!.SourceConfig.push({
+          key,
+          name: site.name,
+          api: site.api,
+          detail: site.detail,
+          from: 'config',
+          disabled: false,
+        });
+      }
+    });
+
+    // 检查现有源是否在 fileConfig.api_site 中，如果不在则标记为 custom
+    const apiSiteKeys = new Set(apiSiteEntries.map(([key]) => key));
+    adminConfig.SourceConfig.forEach((source) => {
+      if (!apiSiteKeys.has(source.key)) {
+        source.from = 'custom';
+      }
+    });
+
+    const ownerUser = process.env.USERNAME || '';
+    // 检查配置中的站长用户是否和 USERNAME 匹配，如果不匹配则降级为普通用户
+    let containOwner = false;
+    adminConfig.UserConfig.Users.forEach((user) => {
+      if (user.username !== ownerUser && user.role === 'owner') {
+        user.role = 'user';
+      }
+      if (user.username === ownerUser) {
+        containOwner = true;
+        user.role = 'owner';
+      }
+    });
+
+    // 如果不在则添加
+    if (!containOwner) {
+      adminConfig.UserConfig.Users.unshift({
+        username: ownerUser,
+        role: 'owner',
+      });
+    }
+    cachedConfig = adminConfig;
+  } else {
+    // DB 无配置，执行一次初始化
+    await initConfig();
+  }
   return cachedConfig;
 }
 
@@ -232,6 +304,21 @@ export async function resetConfig() {
     } catch (e) {
       console.error('获取用户列表失败:', e);
     }
+  }
+
+  if (process.env.DOCKER_ENV === 'true') {
+    // eslint-disable-next-line @typescript-eslint/no-implied-eval
+    const _require = eval('require') as NodeRequire;
+    const fs = _require('fs') as typeof import('fs');
+    const path = _require('path') as typeof import('path');
+
+    const configPath = path.join(process.cwd(), 'config.json');
+    const raw = fs.readFileSync(configPath, 'utf-8');
+    fileConfig = JSON.parse(raw) as ConfigFileStruct;
+    console.log('load dynamic config success');
+  } else {
+    // 默认使用编译时生成的配置
+    fileConfig = runtimeConfig as unknown as ConfigFileStruct;
   }
 
   // 从文件中获取源信息，用于补全源
@@ -252,13 +339,13 @@ export async function resetConfig() {
     SiteConfig: {
       SiteName: process.env.SITE_NAME || 'MoonTV',
       Announcement:
-        process.env.NEXT_PUBLIC_ANNOUNCEMENT ||
+        process.env.ANNOUNCEMENT ||
         '本网站仅提供影视信息搜索服务，所有内容均来自第三方网站。本站不存储任何视频资源，不对任何内容的准确性、合法性、完整性负责。',
       SearchDownstreamMaxPage:
         Number(process.env.NEXT_PUBLIC_SEARCH_MAX_PAGE) || 5,
       SiteInterfaceCacheTime: fileConfig.cache_time || 7200,
-      SearchResultDefaultAggregate:
-        process.env.NEXT_PUBLIC_AGGREGATE_SEARCH_RESULT !== 'false',
+      ImageProxy: process.env.NEXT_PUBLIC_IMAGE_PROXY || '',
+      DoubanProxy: process.env.NEXT_PUBLIC_DOUBAN_PROXY || '',
     },
     UserConfig: {
       AllowRegister: process.env.NEXT_PUBLIC_ENABLE_REGISTER === 'true',
@@ -277,19 +364,22 @@ export async function resetConfig() {
   if (storage && typeof (storage as any).setAdminConfig === 'function') {
     await (storage as any).setAdminConfig(adminConfig);
   }
-
+  if (cachedConfig == null) {
+    // serverless 环境，直接使用 adminConfig
+    cachedConfig = adminConfig;
+  }
   cachedConfig.SiteConfig = adminConfig.SiteConfig;
   cachedConfig.UserConfig = adminConfig.UserConfig;
   cachedConfig.SourceConfig = adminConfig.SourceConfig;
 }
 
-export function getCacheTime(): number {
-  const config = getConfig();
+export async function getCacheTime(): Promise<number> {
+  const config = await getConfig();
   return config.SiteConfig.SiteInterfaceCacheTime || 7200;
 }
 
-export function getAvailableApiSites(): ApiSite[] {
-  const config = getConfig();
+export async function getAvailableApiSites(): Promise<ApiSite[]> {
+  const config = await getConfig();
   return config.SourceConfig.filter((s) => !s.disabled).map((s) => ({
     key: s.key,
     name: s.name,
