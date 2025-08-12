@@ -145,11 +145,58 @@ class HybridCacheManager {
     if (typeof window === 'undefined') return;
 
     try {
+      // 检查缓存大小，超过15MB时清理旧数据
+      const cacheSize = JSON.stringify(cache).length;
+      if (cacheSize > 15 * 1024 * 1024) {
+        console.warn('缓存过大，清理旧数据');
+        this.cleanOldCache(cache);
+      }
+
       const cacheKey = this.getUserCacheKey(username);
       localStorage.setItem(cacheKey, JSON.stringify(cache));
     } catch (error) {
       console.warn('保存用户缓存失败:', error);
+      // 存储空间不足时清理缓存后重试
+      if (error instanceof DOMException && error.name === 'QuotaExceededError') {
+        this.clearAllCache();
+        try {
+          const cacheKey = this.getUserCacheKey(username);
+          localStorage.setItem(cacheKey, JSON.stringify(cache));
+        } catch (retryError) {
+          console.error('重试保存缓存仍然失败:', retryError);
+        }
+      }
     }
+  }
+
+  /**
+   * 清理过期缓存数据
+   */
+  private cleanOldCache(cache: UserCacheStore): void {
+    const now = Date.now();
+    const maxAge = 60 * 24 * 60 * 60 * 1000; // 两个月
+
+    // 清理过期的播放记录缓存
+    if (cache.playRecords && now - cache.playRecords.timestamp > maxAge) {
+      delete cache.playRecords;
+    }
+
+    // 清理过期的收藏缓存
+    if (cache.favorites && now - cache.favorites.timestamp > maxAge) {
+      delete cache.favorites;
+    }
+  }
+
+  /**
+   * 清理所有缓存
+   */
+  private clearAllCache(): void {
+    const keys = Object.keys(localStorage);
+    keys.forEach(key => {
+      if (key.startsWith('moontv_cache_')) {
+        localStorage.removeItem(key);
+      }
+    });
   }
 
   /**
@@ -414,6 +461,15 @@ async function fetchWithAuth(
   if (!res.ok) {
     // 如果是 401 未授权，跳转到登录页面
     if (res.status === 401) {
+      // 调用 logout 接口
+      try {
+        await fetch('/api/logout', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+        });
+      } catch (error) {
+        console.error('注销请求失败:', error);
+      }
       const currentUrl = window.location.pathname + window.location.search;
       const loginUrl = new URL('/login', window.location.origin);
       loginUrl.searchParams.set('redirect', currentUrl);
@@ -1299,7 +1355,7 @@ export function subscribeToDataUpdates<T>(
   callback: (data: T) => void
 ): () => void {
   if (typeof window === 'undefined') {
-    return () => {};
+    return () => { };
   }
 
   const handleUpdate = (event: CustomEvent) => {
